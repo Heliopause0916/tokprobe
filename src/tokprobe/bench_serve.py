@@ -8,8 +8,8 @@ vLLM (OpenAI 兼容接口) 测速工具
   # 单请求测速（默认）
   python -m tokprobe.bench_serve --model my-model
 
-  # 指定模型 / 端口 / 问题
-  python -m tokprobe.bench_serve --port 8082 --model my-model --prompt "介绍一下QUIC协议"
+  # 指定服务地址 / 模型 / 问题
+  python -m tokprobe.bench_serve --base-url http://127.0.0.1:8082 --model my-model --prompt "介绍一下QUIC协议"
 
   # 并发 4、每个请求最大生成 1024 token
   python -m tokprobe.bench_serve --model my-model --concurrency 4 --max-tokens 1024
@@ -25,6 +25,7 @@ import argparse
 import concurrent.futures
 import sys
 import time
+from typing import Optional
 
 from .http import health_ok, post_json
 from .report import mean, percentile, serve_quiet_line
@@ -39,7 +40,7 @@ def validate_cli_args(concurrency: int, n_requests: int) -> None:
 
 
 def run_single(base: str, model: str, prompt: str, max_tokens: int,
-               timeout: int) -> dict:
+               timeout: int, api_key: Optional[str] = None) -> dict:
     """发送单个请求，返回耗时与 token 统计。
 
     网络/HTTP 异常（非 2xx、连接失败、超时等）不抛出，统一折算为
@@ -56,6 +57,7 @@ def run_single(base: str, model: str, prompt: str, max_tokens: int,
                 "temperature": 0,
             },
             timeout=timeout,
+            api_key=api_key,
         )
     except Exception as e:
         elapsed = time.monotonic() - t0
@@ -81,8 +83,10 @@ def run_single(base: str, model: str, prompt: str, max_tokens: int,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="vLLM / OpenAI 兼容接口测速")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8082)
+    ap.add_argument("--base-url", default="http://127.0.0.1:8082",
+                    help="服务基础地址，含协议与端口，如 http://192.168.6.3:8098")
+    ap.add_argument("--api-key", default=None, type=str,
+                    help="可选：Bearer 认证密钥")
     ap.add_argument("--model", required=True, help="模型名（必填）")
     ap.add_argument("--prompt", default="介绍一下QUIC协议")
     ap.add_argument("--max-tokens", type=int, default=4096)
@@ -101,8 +105,8 @@ def main() -> None:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(2)
 
-    base = f"http://{args.host}:{args.port}"
-    if not health_ok(base):
+    base = args.base_url.rstrip("/")
+    if not health_ok(base, args.api_key):
         print(f"错误: {base}/health 不可用", file=sys.stderr)
         sys.exit(1)
 
@@ -113,7 +117,7 @@ def main() -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futures = [
             ex.submit(run_single, base, args.model, args.prompt,
-                      args.max_tokens, args.timeout)
+                      args.max_tokens, args.timeout, args.api_key)
             for _ in range(n_total)
         ]
         for f in concurrent.futures.as_completed(futures):

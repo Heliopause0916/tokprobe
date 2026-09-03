@@ -3,12 +3,12 @@
 被测逻辑不涉及任何真实网络请求（网络部分一律 mock post_json）。
 """
 
-import email.message
 import os
 import sys
 import unittest
-import urllib.error
 from unittest.mock import patch
+
+import requests
 
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -61,11 +61,12 @@ class TestMeasurePrefillNetworkErrors(unittest.TestCase):
                                "test-model", "hi", 1, 30)
 
     @patch("tokprobe.bench_prefill.post_json")
-    def test_urlerror_returns_error_dict(self, mock_post):
-        mock_post.side_effect = urllib.error.URLError("connection refused")
+    def test_connection_error_returns_error_dict(self, mock_post):
+        mock_post.side_effect = \
+            requests.exceptions.ConnectionError("connection refused")
         r = self._call()
         self.assertIn("error", r)
-        self.assertIn("URLError", r["error"])
+        self.assertIn("ConnectionError", r["error"])
         self.assertEqual(r["prompt_tokens"], 0)
         self.assertEqual(r["completion_tokens"], 0)
         self.assertEqual(r["prefill_tps"], 0.0)
@@ -74,8 +75,8 @@ class TestMeasurePrefillNetworkErrors(unittest.TestCase):
 
     @patch("tokprobe.bench_prefill.post_json")
     def test_httperror_returns_error_dict(self, mock_post):
-        mock_post.side_effect = urllib.error.HTTPError(
-            "http://x", 400, "Bad Request", email.message.Message(), None)
+        mock_post.side_effect = requests.exceptions.HTTPError(
+            "400 Bad Request")
         r = self._call()
         self.assertIn("error", r)
         self.assertIn("HTTPError", r["error"])
@@ -84,7 +85,8 @@ class TestMeasurePrefillNetworkErrors(unittest.TestCase):
     @patch("tokprobe.bench_prefill.post_json")
     def test_all_failed_samples_aggregate_safely(self, mock_post):
         """全部样本失败时：summary 统计不抛异常，空样本输出 0.0 风格值。"""
-        mock_post.side_effect = urllib.error.URLError("boom")
+        mock_post.side_effect = \
+            requests.exceptions.ConnectionError("boom")
         runs = [self._call() for _ in range(2)]
         self.assertTrue(all(r.get("error") for r in runs))
 

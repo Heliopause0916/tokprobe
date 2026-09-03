@@ -36,8 +36,8 @@ python -m tokprobe.bench_prefill --model my-model --quiet
 # 单请求测速（默认）
 python -m tokprobe.bench_serve --model my-model
 
-# 指定模型 / 端口 / 问题
-python -m tokprobe.bench_serve --port 8082 --model my-model --prompt "介绍一下QUIC协议"
+# 指定服务地址 / 模型 / 问题
+python -m tokprobe.bench_serve --base-url http://127.0.0.1:8082 --model my-model --prompt "介绍一下QUIC协议"
 
 # 并发 4、每个请求最大生成 1024 token
 python -m tokprobe.bench_serve --model my-model --concurrency 4 --max-tokens 1024
@@ -57,7 +57,8 @@ wall=12.34s requests=8/8 total_ct=2048 total_pt=64 avg_tps=166.0 per_req_mean=92
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--host` / `--port` | `127.0.0.1` / `8082` | 服务地址 |
+| `--base-url` | `http://127.0.0.1:8082` | 服务基础地址（含协议与端口），如 `http://192.168.6.3:8098` |
+| `--api-key` | 无 | 可选，Bearer 认证密钥 |
 | `--model` | 必填 | 模型名（必填，无默认值） |
 | `--prompt` | `介绍一下QUIC协议` | 请求内容 |
 | `--max-tokens` | `4096` | 每个请求最大生成 token |

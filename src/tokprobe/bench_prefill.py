@@ -2,7 +2,7 @@
 """
 vLLM（OpenAI 兼容接口）预填充（prefill）测速工具
 ==================================================
-参考 tokprobe.bench_serve 的风格（仅用标准库 urllib、零额外依赖），
+参考 tokprobe.bench_serve 的风格（网络层基于 requests），
 针对"预填充阶段"单独测速：
 
   prefill_tok/s = usage.prompt_tokens / 单请求墙钟
@@ -24,8 +24,8 @@ vLLM（OpenAI 兼容接口）预填充（prefill）测速工具
   # 默认：128K 目标、3 个 seed 取均值
   python -m tokprobe.bench_prefill --model my-model
 
-  # 指定端口/模型（与 .env 对齐）
-  python -m tokprobe.bench_prefill --port 8082 --model my-model
+  # 指定服务地址/模型
+  python -m tokprobe.bench_prefill --base-url http://127.0.0.1:8082 --model my-model
 
   # 同时测 64K 与 128K 两个档位
   python -m tokprobe.bench_prefill --model my-model --target-tokens 65536,131072
@@ -44,6 +44,7 @@ import random
 import secrets
 import sys
 import time
+from typing import Optional
 
 from .http import health_ok, post_json
 from .report import mean, median, prefill_quiet_line
@@ -70,7 +71,8 @@ def parse_target_tokens(s: str) -> list:
 
 
 def calibrate_char_per_token(base: str, model: str,
-                             sample_chars: int = 4096) -> float:
+                             sample_chars: int = 4096,
+                             api_key: Optional[str] = None) -> float:
     """
     用 /tokenize 精确校准当前模型的字符/token 比。
 
@@ -81,7 +83,8 @@ def calibrate_char_per_token(base: str, model: str,
     """
     p = build_prompt(0, sample_chars)
     count = post_json(f"{base}/tokenize",
-                      {"model": model, "prompt": p}, 60)["count"]
+                      {"model": model, "prompt": p}, 60,
+                      api_key=api_key)["count"]
     ratio = len(p) / count if count > 0 else 1.0
     return ratio
 
@@ -121,7 +124,8 @@ def build_prompt(seed: int, target_chars: int,
 # ---------- 单请求 prefill 测量 ----------
 
 def measure_prefill(base: str, model: str, prompt: str,
-                    max_tokens: int, timeout: int) -> dict:
+                    max_tokens: int, timeout: int,
+                    api_key: Optional[str] = None) -> dict:
     t0 = time.monotonic()
     try:
         resp = post_json(
@@ -133,6 +137,7 @@ def measure_prefill(base: str, model: str, prompt: str,
                 "temperature": 0,
             },
             timeout=timeout,
+            api_key=api_key,
         )
     except Exception as e:
         elapsed = time.monotonic() - t0
@@ -162,11 +167,12 @@ def measure_prefill(base: str, model: str, prompt: str,
 
 def run_sample(base: str, model: str, seed: int, target_tokens: int,
                char_per_token: float, max_tokens: int,
-               timeout: int) -> dict:
+               timeout: int, api_key: Optional[str] = None) -> dict:
     """根据 seed 生成文本并测量一次 prefill。"""
     target_chars = max(1, int(target_tokens * char_per_token))
     prompt = build_prompt(seed, target_chars)
-    r = measure_prefill(base, model, prompt, max_tokens, timeout)
+    r = measure_prefill(base, model, prompt, max_tokens, timeout,
+                        api_key=api_key)
     r.update({"seed": seed, "target_tokens": target_tokens,
               "gen_chars": len(prompt)})
     return r
@@ -176,8 +182,10 @@ def run_sample(base: str, model: str, seed: int, target_tokens: int,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="vLLM / OpenAI 兼容接口预填充测速")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=8082)
+    ap.add_argument("--base-url", default="http://127.0.0.1:8082",
+                    help="服务基础地址，含协议与端口，如 http://192.168.6.3:8098")
+    ap.add_argument("--api-key", default=None, type=str,
+                    help="可选：Bearer 认证密钥")
     ap.add_argument("--model", required=True, help="模型名（必填）")
     ap.add_argument("--target-tokens", default="131072",
                     help="目标 token 档位，逗号分隔多值，如 65536,131072")
@@ -202,15 +210,16 @@ def main() -> None:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(2)
 
-    base = f"http://{args.host}:{args.port}"
-    if not health_ok(base):
+    base = args.base_url.rstrip("/")
+    if not health_ok(base, args.api_key):
         print(f"错误: {base}/health 不可用", file=sys.stderr)
         sys.exit(1)
 
     # 用 /tokenize 自动校准字符/token 比，避免默认估算超 max_model_len
     if not args.char_per_token:
         try:
-            args.char_per_token = calibrate_char_per_token(base, args.model)
+            args.char_per_token = calibrate_char_per_token(
+                base, args.model, api_key=args.api_key)
         except Exception as e:
             print(f"警告: /tokenize 校准失败(用回 1.0): {e}", file=sys.stderr)
             args.char_per_token = 1.0
@@ -223,6 +232,7 @@ def main() -> None:
                  "messages": [{"role": "user", "content": "Reply with: ok"}],
                  "max_tokens": 8, "temperature": 0},
                 timeout=120,
+                api_key=args.api_key,
             )
         except Exception as e:
             print(f"警告: 暖机请求失败: {e}", file=sys.stderr)
@@ -236,7 +246,7 @@ def main() -> None:
             seed = secrets.randbits(63) if args.random_seeds else se
             r = run_sample(base, args.model, seed, target_tokens,
                            args.char_per_token, args.max_tokens,
-                           args.timeout)
+                           args.timeout, args.api_key)
             samples.append(r)
             runs.append(r)
 

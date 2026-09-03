@@ -4,12 +4,12 @@
 不发起任何真实网络请求。
 """
 
-import email.message
 import os
 import sys
 import unittest
-import urllib.error
 from unittest.mock import patch
+
+import requests
 
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -24,11 +24,12 @@ def _args():
 
 class TestRunSingleNetworkErrors(unittest.TestCase):
     @patch("tokprobe.bench_serve.post_json")
-    def test_urlerror_returns_error_dict(self, mock_post):
-        mock_post.side_effect = urllib.error.URLError("connection refused")
+    def test_connection_error_returns_error_dict(self, mock_post):
+        mock_post.side_effect = \
+            requests.exceptions.ConnectionError("connection refused")
         r = run_single(*_args())
         self.assertIn("error", r)
-        self.assertIn("URLError", r["error"])
+        self.assertIn("ConnectionError", r["error"])
         self.assertEqual(r["prompt_tokens"], 0)
         self.assertEqual(r["completion_tokens"], 0)
         self.assertEqual(r["tok_per_s"], 0.0)
@@ -36,9 +37,8 @@ class TestRunSingleNetworkErrors(unittest.TestCase):
 
     @patch("tokprobe.bench_serve.post_json")
     def test_httperror_returns_error_dict(self, mock_post):
-        mock_post.side_effect = urllib.error.HTTPError(
-            "http://x", 500, "Internal Server Error",
-            email.message.Message(), None)
+        mock_post.side_effect = requests.exceptions.HTTPError(
+            "500 Internal Server Error")
         r = run_single(*_args())
         self.assertIn("error", r)
         self.assertIn("HTTPError", r["error"])
@@ -60,7 +60,8 @@ class TestAggregationWithAllFailures(unittest.TestCase):
     @patch("tokprobe.bench_serve.post_json")
     def test_all_failed_run_single_results_aggregate_safely(self, mock_post):
         """全部请求失败时：聚合统计不抛异常，空样本输出 0.0 风格值。"""
-        mock_post.side_effect = urllib.error.URLError("boom")
+        mock_post.side_effect = \
+            requests.exceptions.ConnectionError("boom")
         results = [run_single(*_args()) for _ in range(3)]
         self.assertTrue(all(r.get("error") for r in results))
 
@@ -77,7 +78,7 @@ class TestAggregationWithAllFailures(unittest.TestCase):
 
         self.assertEqual(len(ok), 0)
         self.assertEqual(len(err), 3)
-        self.assertIn("URLError", err[0]["error"])
+        self.assertIn("ConnectionError", err[0]["error"])
         self.assertEqual(total_ct, 0)
         self.assertEqual(total_pt, 0)
         self.assertEqual(avg_tps, 0.0)
