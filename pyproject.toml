@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tokprobe"
+version = "0.1.0"
+description = "轻量 vLLM 测速 / prefill 探针：纯标准库的 OpenAI 兼容接口测量工具"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+license = { text = "MIT" }
+
+[project.scripts]
+tokprobe-serve = "tokprobe.bench_serve:main"
+tokprobe-prefill = "tokprobe.bench_prefill:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Pyright 通用配置（本机若存在 pyrightconfig.json，其优先级高于本段；无该文件的环境回落至此）
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "**/.pytest_cache"]
+typeCheckingMode = "standard"  # 需严格检查者可改为 strict
