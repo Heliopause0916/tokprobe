@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tokprobe"
 version = "0.1.0"
-description = "轻量 vLLM 测速 / prefill 探针：纯标准库的 OpenAI 兼容接口测量工具"
+description = "轻量 vLLM 测速 / prefill 探针：基于 requests 的 OpenAI 兼容接口测量工具"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["requests"]

@@ -46,14 +46,18 @@ class TestRunSingleNetworkErrors(unittest.TestCase):
         self.assertEqual(r["tok_per_s"], 0.0)
 
     @patch("tokprobe.bench_serve.post_json")
-    def test_success_returns_full_dict_without_error(self, mock_post):
+    @patch("tokprobe.bench_serve.time.monotonic", side_effect=[0.0, 1.0])
+    def test_success_returns_full_dict_without_error(self, mock_monotonic,
+                                                     mock_post):
+        # mock time.monotonic 为确定值，避免真实计时抖动导致 elapsed==0
         mock_post.return_value = {"usage": {"prompt_tokens": 8,
                                             "completion_tokens": 16}}
         r = run_single(*_args())
         self.assertIsNone(r["error"])
         self.assertEqual(r["prompt_tokens"], 8)
         self.assertEqual(r["completion_tokens"], 16)
-        self.assertGreater(r["tok_per_s"], 0.0)
+        self.assertEqual(r["elapsed"], 1.0)
+        self.assertEqual(r["tok_per_s"], 16.0)
 
 
 class TestAggregationWithAllFailures(unittest.TestCase):

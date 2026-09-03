@@ -1,6 +1,6 @@
 # tokprobe
 
-轻量 vLLM 测速 / prefill 探针（纯标准库，零第三方依赖）。
+轻量 vLLM 测速 / prefill 探针（网络层基于 requests）。
 
 tokprobe 定位为**轻量测量工具**而非压测平台：用最少的代码、最快的上手路径，
 对 OpenAI 兼容接口（vLLM / vLLM 系服务）做两类测量并给出可归因的结论——
@@ -13,7 +13,7 @@ tokprobe 定位为**轻量测量工具**而非压测平台：用最少的代码�
 
 ## 安装
 
-无需安装任何第三方依赖（仅 Python 3.9+ 标准库）。
+第三方依赖仅 requests（Python 3.9+）。
 
 ```bash
 # 方式一：可编辑安装（提供 tokprobe-serve / tokprobe-prefill 两个命令）
