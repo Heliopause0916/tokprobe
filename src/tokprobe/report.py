@@ -10,7 +10,7 @@
 --quiet 输出函数保持原有字段名与格式不变，仅将格式化逻辑集中于此。
 """
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 
 def mean(xs: Sequence[float]) -> float:
@@ -53,19 +53,37 @@ def percentile(xs: Sequence[float], p: float) -> float:
 
 def serve_quiet_line(wall: float, ok_count: int, total: int,
                      total_ct: int, total_pt: int, avg_tps: float,
-                     per_req_mean: float, per_req_p50: float) -> str:
-    """bench_serve 的 --quiet 单行输出（字段名与格式与原脚本一致）。"""
-    return (f"wall={wall:.2f}s requests={ok_count}/{total} "
+                     per_req_mean: float, per_req_p50: float,
+                     stream_stats: Optional[dict] = None) -> str:
+    """bench_serve 的 --quiet 单行输出（字段名与格式与原脚本一致）。
+
+    ``stream_stats`` 为 None（默认）时输出与旧格式逐字符一致；
+    非空时在行尾追加流式统计（键：ttft_mean / decode_tps_mean / chunks_mean）。
+    """
+    line = (f"wall={wall:.2f}s requests={ok_count}/{total} "
             f"total_ct={total_ct} total_pt={total_pt} "
             f"avg_tps={avg_tps:.1f} "
             f"per_req_mean={per_req_mean:.1f} per_req_p50={per_req_p50:.1f}")
+    if stream_stats is not None:
+        line += (f" ttft_mean={stream_stats['ttft_mean']:.3f}"
+                 f" decode_tps_mean={stream_stats['decode_tps_mean']:.1f}"
+                 f" chunks_mean={stream_stats['chunks_mean']:.1f}")
+    return line
 
 
 def prefill_quiet_line(target_tokens: int, ok: int, runs: int,
                        mean_pt: float, mean_tps: float,
-                       med_tps: float) -> str:
-    """bench_prefill 的 --quiet 单行输出（每档位一行，格式与原脚本一致）。"""
-    return (f"target={target_tokens} ok={ok}/{runs} "
+                       med_tps: float,
+                       ttft_mean: Optional[float] = None) -> str:
+    """bench_prefill 的 --quiet 单行输出（每档位一行，格式与原脚本一致）。
+
+    ``ttft_mean`` 为 None（默认）时输出与旧格式逐字符一致；
+    非 None 时在行尾追加 `` ttft_mean={ttft_mean:.3f}``。
+    """
+    line = (f"target={target_tokens} ok={ok}/{runs} "
             f"emp_pt={mean_pt:.0f} "
             f"prefill_mean={mean_tps:.1f} "
             f"prefill_med={med_tps:.1f} tok/s")
+    if ttft_mean is not None:
+        line += f" ttft_mean={ttft_mean:.3f}"
+    return line

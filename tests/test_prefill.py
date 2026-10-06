@@ -1,14 +1,12 @@
 """bench_prefill（build_prompt / measure_prefill / parse_target_tokens）单元测试。
 
-被测逻辑不涉及任何真实网络请求（网络部分一律 mock post_json）。
+被测逻辑不涉及任何真实网络请求（网络层一律 mock：chat_request / post_json）。
 """
 
 import os
 import sys
 import unittest
-from unittest.mock import patch
-
-import requests
+from unittest.mock import MagicMock, patch
 
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -57,36 +55,25 @@ class TestBuildPrompt(unittest.TestCase):
 
 class TestMeasurePrefillNetworkErrors(unittest.TestCase):
     def _call(self):
-        return measure_prefill("http://127.0.0.1:8082",
-                               "test-model", "hi", 1, 30)
+        return measure_prefill(MagicMock(), "test-model", "hi", 1, 30)
 
-    @patch("tokprobe.bench_prefill.post_json")
-    def test_connection_error_returns_error_dict(self, mock_post):
-        mock_post.side_effect = \
-            requests.exceptions.ConnectionError("connection refused")
+    @patch("tokprobe.bench_prefill.chat_request")
+    def test_exception_returns_error_dict(self, mock_cr):
+        mock_cr.side_effect = RuntimeError("boom")
         r = self._call()
         self.assertIn("error", r)
-        self.assertIn("ConnectionError", r["error"])
+        self.assertIn("RuntimeError: boom", r["error"])
         self.assertEqual(r["prompt_tokens"], 0)
         self.assertEqual(r["completion_tokens"], 0)
         self.assertEqual(r["prefill_tps"], 0.0)
         self.assertEqual(r["ms_per_token"], 0.0)
+        self.assertEqual(r["ttft"], 0.0)
         self.assertGreaterEqual(r["elapsed"], 0.0)
 
-    @patch("tokprobe.bench_prefill.post_json")
-    def test_httperror_returns_error_dict(self, mock_post):
-        mock_post.side_effect = requests.exceptions.HTTPError(
-            "400 Bad Request")
-        r = self._call()
-        self.assertIn("error", r)
-        self.assertIn("HTTPError", r["error"])
-        self.assertEqual(r["prefill_tps"], 0.0)
-
-    @patch("tokprobe.bench_prefill.post_json")
-    def test_all_failed_samples_aggregate_safely(self, mock_post):
+    @patch("tokprobe.bench_prefill.chat_request")
+    def test_all_failed_samples_aggregate_safely(self, mock_cr):
         """全部样本失败时：summary 统计不抛异常，空样本输出 0.0 风格值。"""
-        mock_post.side_effect = \
-            requests.exceptions.ConnectionError("boom")
+        mock_cr.side_effect = RuntimeError("boom")
         runs = [self._call() for _ in range(2)]
         self.assertTrue(all(r.get("error") for r in runs))
 
@@ -106,6 +93,57 @@ class TestMeasurePrefillNetworkErrors(unittest.TestCase):
         line = prefill_quiet_line(131072, len(ok), len(runs),
                                   mean_pt, mean_tps, med_tps)
         self.assertIn("ok=0/2", line)
+
+
+class TestMeasurePrefillSuccess(unittest.TestCase):
+    @patch("tokprobe.bench_prefill.time")
+    @patch("tokprobe.bench_prefill.chat_request")
+    def test_nonstream_success(self, mock_cr, mock_time):
+        mock_cr.return_value = {"usage": {"prompt_tokens": 100,
+                                          "completion_tokens": 1,
+                                          "total_tokens": 101},
+                                "ttft": None, "chunk_count": 0}
+        mock_time.monotonic.side_effect = [0.0, 2.0]
+        r = measure_prefill(MagicMock(), "test-model", "hi", 1, 30)
+        self.assertEqual(r["elapsed"], 2.0)
+        self.assertEqual(r["prompt_tokens"], 100)
+        self.assertEqual(r["completion_tokens"], 1)
+        # 口径不变：prefill_tps = pt/elapsed；ms_per_token = elapsed*1000/pt
+        self.assertEqual(r["prefill_tps"], 50.0)
+        self.assertEqual(r["ms_per_token"], 20.0)
+        self.assertEqual(r["ttft"], 0.0)
+        self.assertIsNone(r["error"])
+
+    @patch("tokprobe.bench_prefill.time")
+    @patch("tokprobe.bench_prefill.chat_request")
+    def test_stream_success_reports_ttft(self, mock_cr, mock_time):
+        mock_cr.return_value = {"usage": {"prompt_tokens": 100,
+                                          "completion_tokens": 1,
+                                          "total_tokens": 101},
+                                "ttft": 0.1, "chunk_count": 2}
+        mock_time.monotonic.side_effect = [0.0, 2.0]
+        r = measure_prefill(MagicMock(), "test-model", "hi", 1, 30,
+                            stream=True)
+        self.assertTrue(mock_cr.call_args.kwargs["stream"])
+        self.assertEqual(r["ttft"], 0.1)
+        # 流式不改变 prefill 口径：仍按整段墙钟折算
+        self.assertEqual(r["prefill_tps"], 50.0)
+        self.assertEqual(r["ms_per_token"], 20.0)
+        self.assertIsNone(r["error"])
+
+
+class TestPrefillQuietLineTtft(unittest.TestCase):
+    BASE = ("target=131072 ok=3/3 emp_pt=134912 "
+            "prefill_mean=45210.5 prefill_med=45000.2 tok/s")
+
+    def test_default_matches_old_format(self):
+        line = prefill_quiet_line(131072, 3, 3, 134912.0, 45210.5, 45000.2)
+        self.assertEqual(line, self.BASE)
+
+    def test_ttft_mean_appended(self):
+        line = prefill_quiet_line(131072, 3, 3, 134912.0, 45210.5, 45000.2,
+                                  ttft_mean=0.1234)
+        self.assertEqual(line, self.BASE + " ttft_mean=0.123")
 
 
 class TestParseTargetTokens(unittest.TestCase):

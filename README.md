@@ -1,6 +1,6 @@
 # tokprobe
 
-轻量 vLLM 测速 / prefill 探针（网络层基于 requests）。
+轻量 vLLM 测速 / prefill 探针（chat 请求走 openai 官方 SDK；/health 与 /tokenize 保留 requests）。
 
 tokprobe 定位为**轻量测量工具**而非压测平台：用最少的代码、最快的上手路径，
 对 OpenAI 兼容接口（vLLM / vLLM 系服务）做两类测量并给出可归因的结论——
@@ -13,7 +13,7 @@ tokprobe 定位为**轻量测量工具**而非压测平台：用最少的代码�
 
 ## 安装
 
-第三方依赖仅 requests（Python 3.9+）。
+依赖为 requests + openai>=1.26.0（Python 3.9+）。
 
 ```bash
 # 方式一：可编辑安装（提供 tokprobe-serve / tokprobe-prefill 两个命令）
@@ -27,6 +27,19 @@ python -m tokprobe.bench_prefill --model my-model --quiet
 
 > 说明：`python -m tokprobe.xxx` 依赖包可被导入。方式一安装后直接可用；
 > 方式二需要把 `src/` 加入 `PYTHONPATH`（或先 `pip install -e .`）。
+
+## openai SDK 与流式（--stream）
+
+- **请求层**：chat 请求统一改用 openai 官方 SDK（同步客户端、
+  `max_retries=0` 避免重试污染计时）；`/health` 与 `/tokenize` 仍用 requests。
+- **`--stream` 开关**：`bench_serve` 与 `bench_prefill` 两入口均支持，默认关
+  （非流式）。流式模式下额外输出 TTFT，serve 另含 decode 段吞吐与平均
+  chunk 数。口径：TTFT = 首个非空 content chunk 到达时刻 - t0；decode 段
+  吞吐 = (completion_tokens - 1) / (流结束时刻 - ttft)。
+- **usage 获取**：流式请求带 `stream_options={"include_usage": True}`，token
+  数始终取响应 usage 字段。需要 vLLM 支持 include_usage：较旧版本在最终
+  chunk 缺 usage 或直接报 400。
+- **依赖**：requests + openai>=1.26.0（Python 3.9+）。
 
 ## 用法
 
@@ -112,12 +125,15 @@ target=131072 ok=3/3 emp_pt=134912 prefill_mean=45210.5 prefill_med=45000.2 tok/
       "completion_tokens": 1,
       "elapsed": 2.9,
       "prefill_tps": 46521.4,
-      "ms_per_token": 0.0215,
-      "error": null
-    }
+       "ms_per_token": 0.0215,
+       "error": null,
+       "ttft": 0.0
+     }
   ]
 }
 ```
+
+> 样本对象恒含 `ttft` 键：非流式恒为 0.0，流式（`--stream`）下为首个内容 token 延迟（秒）。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -169,12 +185,12 @@ pyright
 ```
 src/tokprobe/
   __init__.py       包元信息
-  http.py           公共网络辅助：post_json / health_ok
+  http.py           公共网络辅助：post_json / make_client / chat_request / health_ok
   bench_serve.py    通用端到端并发压测（python -m tokprobe.bench_serve）
   bench_prefill.py  prefill 专项测速（python -m tokprobe.bench_prefill）
   report.py         统计与输出辅助：mean / median / percentile、--quiet 单行输出
 tests/
   test_report.py    统计函数与 --quiet 输出格式
-  test_http.py      post_json / health_ok（mock，不发真实网络请求）
+  test_http.py      post_json / health_ok / make_client / chat_request（mock，不发真实网络请求）
   test_prefill.py   build_prompt 可复现性与防缓存特性
 ```

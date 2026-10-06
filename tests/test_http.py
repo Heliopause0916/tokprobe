@@ -7,6 +7,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
@@ -14,7 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 import requests
 
-from tokprobe.http import health_ok, post_json
+from tokprobe.http import chat_request, health_ok, make_client, post_json
 
 
 def _mock_resp(status_code=200, body=None):
@@ -107,6 +108,140 @@ class TestHealthOk(unittest.TestCase):
             health_ok("http://127.0.0.1:8082", api_key="sk-xyz"))
         headers = mock_get.call_args.kwargs["headers"]
         self.assertEqual(headers["Authorization"], "Bearer sk-xyz")
+
+
+class TestMakeClient(unittest.TestCase):
+    def test_make_client_joins_v1_and_disables_retries(self):
+        # OpenAI 构造不联网，可直接实例化
+        client = make_client("http://127.0.0.1:8082", api_key="sk-abc")
+        # 对字符串形式断言（base_url 可能为 httpx 类型），不依赖 SDK 是否补尾斜杠
+        self.assertTrue(str(client.base_url).startswith("http://127.0.0.1:8082/v1"))
+        self.assertEqual(client.max_retries, 0)
+        self.assertEqual(client.api_key, "sk-abc")
+
+    def test_make_client_default_api_key_is_empty(self):
+        # 无 key 时用占位值 "EMPTY"
+        client = make_client("http://127.0.0.1:8082")
+        self.assertEqual(client.api_key, "EMPTY")
+
+
+class TestChatRequestNonStream(unittest.TestCase):
+    def test_chat_request_returns_usage_and_no_stream_kwarg(self):
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            usage=SimpleNamespace(prompt_tokens=8, completion_tokens=16,
+                                  total_tokens=24))
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30)
+
+        self.assertEqual(r["usage"], {"prompt_tokens": 8,
+                                      "completion_tokens": 16,
+                                      "total_tokens": 24})
+        self.assertIsNone(r["ttft"])
+        self.assertEqual(r["chunk_count"], 0)
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["model"], "test-model")
+        self.assertEqual(kwargs["max_tokens"], 16)
+        self.assertEqual(kwargs["timeout"], 30)
+        self.assertNotIn("stream", kwargs)
+
+
+class _FakeStream(list):
+    """承载 chunk 列表的假流对象，记录 close() 是否被调用。"""
+
+    def __init__(self, chunks):
+        super().__init__(chunks)
+        self.closed = False
+
+    def __iter__(self):
+        # 遍历 list 内容；不能写 `for chunk in self`，否则会递归调用自身
+        for chunk in list.__iter__(self):
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+class TestChatRequestStream(unittest.TestCase):
+    @patch("tokprobe.http.time.monotonic", side_effect=[0.0, 0.2])
+    def test_stream_success_records_usage_ttft_and_closes(self, mock_monotonic):
+        # 第 1 次 monotonic 在 create 前（t0=0.0），第 2 次在首内容 chunk（ttft=0.2）
+        usage = SimpleNamespace(prompt_tokens=8, completion_tokens=16,
+                                total_tokens=24)
+        chunks = _FakeStream([
+            # role-only chunk：content 为空串，跳过 TTFT
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content=""),
+                                         finish_reason=None)],
+                usage=None),
+            # 首个内容 chunk
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="你"),
+                                         finish_reason=None)],
+                usage=None),
+            # 末 usage chunk：choices 为空数组
+            SimpleNamespace(choices=[], usage=usage),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["usage"], {"prompt_tokens": 8,
+                                      "completion_tokens": 16,
+                                      "total_tokens": 24})
+        self.assertEqual(r["chunk_count"], 3)
+        self.assertGreater(r["ttft"], 0)
+        self.assertTrue(chunks.closed)
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertTrue(kwargs["stream"])
+        self.assertEqual(kwargs["stream_options"], {"include_usage": True})
+
+    def test_stream_without_usage_chunk_returns_zero_usage(self):
+        chunks = _FakeStream([
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="你"),
+                                         finish_reason=None)],
+                usage=None),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["usage"], {"prompt_tokens": 0,
+                                      "completion_tokens": 0,
+                                      "total_tokens": 0})
+        self.assertEqual(r["chunk_count"], 1)
+
+    def test_stream_interrupted_propagates_and_closes(self):
+        class _BrokenStream(_FakeStream):
+            def __iter__(self):
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(
+                        content="你"), finish_reason=None)],
+                    usage=None)
+                raise RuntimeError("stream interrupted")
+
+        stream = _BrokenStream([])
+        client = MagicMock()
+        client.chat.completions.create.return_value = stream
+
+        with self.assertRaises(RuntimeError) as ctx:
+            chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+        self.assertIn("stream interrupted", str(ctx.exception))
+        # finally 生效：即使迭代中途异常，close 也已调用
+        self.assertTrue(stream.closed)
 
 
 if __name__ == "__main__":

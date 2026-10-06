@@ -1,15 +1,13 @@
 """bench_serve（run_single 网络异常与参数校验）的单元测试。
 
-全部基于 mock（patch tokprobe.bench_serve.post_json），
+全部基于 mock（patch tokprobe.bench_serve.chat_request），
 不发起任何真实网络请求。
 """
 
 import os
 import sys
 import unittest
-from unittest.mock import patch
-
-import requests
+from unittest.mock import MagicMock, patch
 
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -18,56 +16,78 @@ from tokprobe.bench_serve import run_single, validate_cli_args
 from tokprobe.report import mean, percentile, serve_quiet_line
 
 
-def _args():
-    return ("http://127.0.0.1:8082", "test-model", "hi", 16, 30)
+def _run_single(mock_chat, stream=False):
+    # chat_request 被 patch 后，client 不被实际使用，传 MagicMock 占位
+    return run_single(MagicMock(), "test-model", "hi", 16, 30, stream=stream)
 
 
 class TestRunSingleNetworkErrors(unittest.TestCase):
-    @patch("tokprobe.bench_serve.post_json")
-    def test_connection_error_returns_error_dict(self, mock_post):
-        mock_post.side_effect = \
-            requests.exceptions.ConnectionError("connection refused")
-        r = run_single(*_args())
+    @patch("tokprobe.bench_serve.chat_request")
+    def test_exception_returns_error_dict(self, mock_chat):
+        mock_chat.side_effect = RuntimeError("boom")
+        r = _run_single(mock_chat)
         self.assertIn("error", r)
-        self.assertIn("ConnectionError", r["error"])
+        self.assertIn("RuntimeError: boom", r["error"])
         self.assertEqual(r["prompt_tokens"], 0)
         self.assertEqual(r["completion_tokens"], 0)
         self.assertEqual(r["tok_per_s"], 0.0)
+        self.assertEqual(r["ttft"], 0.0)
+        self.assertEqual(r["decode_tps"], 0.0)
+        self.assertEqual(r["chunk_count"], 0)
         self.assertGreaterEqual(r["elapsed"], 0.0)
 
-    @patch("tokprobe.bench_serve.post_json")
-    def test_httperror_returns_error_dict(self, mock_post):
-        mock_post.side_effect = requests.exceptions.HTTPError(
-            "500 Internal Server Error")
-        r = run_single(*_args())
-        self.assertIn("error", r)
-        self.assertIn("HTTPError", r["error"])
-        self.assertEqual(r["completion_tokens"], 0)
-        self.assertEqual(r["tok_per_s"], 0.0)
-
-    @patch("tokprobe.bench_serve.post_json")
     @patch("tokprobe.bench_serve.time.monotonic", side_effect=[0.0, 1.0])
-    def test_success_returns_full_dict_without_error(self, mock_monotonic,
-                                                     mock_post):
+    @patch("tokprobe.bench_serve.chat_request")
+    def test_success_returns_full_dict_without_error(self, mock_chat,
+                                                     mock_monotonic):
         # mock time.monotonic 为确定值，避免真实计时抖动导致 elapsed==0
-        mock_post.return_value = {"usage": {"prompt_tokens": 8,
-                                            "completion_tokens": 16}}
-        r = run_single(*_args())
+        mock_chat.return_value = {
+            "usage": {"prompt_tokens": 8, "completion_tokens": 16},
+            "ttft": None,
+            "chunk_count": 0,
+        }
+        r = _run_single(mock_chat)
         self.assertIsNone(r["error"])
         self.assertEqual(r["prompt_tokens"], 8)
         self.assertEqual(r["completion_tokens"], 16)
         self.assertEqual(r["elapsed"], 1.0)
         self.assertEqual(r["tok_per_s"], 16.0)
+        self.assertEqual(r["ttft"], 0.0)
+        self.assertEqual(r["decode_tps"], 0.0)
+        self.assertEqual(r["chunk_count"], 0)
+
+    @patch("tokprobe.bench_serve.time.monotonic", side_effect=[0.0, 1.0])
+    @patch("tokprobe.bench_serve.chat_request")
+    def test_stream_success_returns_ttft_and_decode_tps(self, mock_chat,
+                                                        mock_monotonic):
+        mock_chat.return_value = {
+            "usage": {"prompt_tokens": 8, "completion_tokens": 16},
+            "ttft": 0.2,
+            "chunk_count": 18,
+        }
+        r = _run_single(mock_chat, stream=True)
+        self.assertIsNone(r["error"])
+        self.assertEqual(r["ttft"], 0.2)
+        self.assertEqual(r["chunk_count"], 18)
+        self.assertEqual(r["elapsed"], 1.0)
+        self.assertEqual(r["tok_per_s"], 16.0)
+        # decode: (16-1)/(1.0-0.2) = 18.75
+        self.assertAlmostEqual(r["decode_tps"], 18.75, places=9)
 
 
 class TestAggregationWithAllFailures(unittest.TestCase):
-    @patch("tokprobe.bench_serve.post_json")
-    def test_all_failed_run_single_results_aggregate_safely(self, mock_post):
+    @patch("tokprobe.bench_serve.chat_request")
+    def test_all_failed_run_single_results_aggregate_safely(self, mock_chat):
         """全部请求失败时：聚合统计不抛异常，空样本输出 0.0 风格值。"""
-        mock_post.side_effect = \
-            requests.exceptions.ConnectionError("boom")
-        results = [run_single(*_args()) for _ in range(3)]
+        mock_chat.side_effect = RuntimeError("boom")
+        results = [_run_single(mock_chat) for _ in range(3)]
         self.assertTrue(all(r.get("error") for r in results))
+
+        # 失败样本 dict 含新键，聚合取值不会 KeyError
+        for r in results:
+            self.assertEqual(r["ttft"], 0.0)
+            self.assertEqual(r["decode_tps"], 0.0)
+            self.assertEqual(r["chunk_count"], 0)
 
         # 模拟 main 的聚合统计逻辑
         ok = [r for r in results if not r.get("error")]
@@ -82,7 +102,7 @@ class TestAggregationWithAllFailures(unittest.TestCase):
 
         self.assertEqual(len(ok), 0)
         self.assertEqual(len(err), 3)
-        self.assertIn("ConnectionError", err[0]["error"])
+        self.assertIn("RuntimeError", err[0]["error"])
         self.assertEqual(total_ct, 0)
         self.assertEqual(total_pt, 0)
         self.assertEqual(avg_tps, 0.0)

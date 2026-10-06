@@ -2,7 +2,8 @@
 """
 vLLM（OpenAI 兼容接口）预填充（prefill）测速工具
 ==================================================
-参考 tokprobe.bench_serve 的风格（网络层基于 requests），
+参考 tokprobe.bench_serve 的风格（chat 请求统一走 openai 官方同步 SDK，
+可用 --stream 开启流式并附加输出 TTFT；/health 与 /tokenize 保留 requests），
 针对"预填充阶段"单独测速：
 
   prefill_tok/s = usage.prompt_tokens / 单请求墙钟
@@ -46,7 +47,7 @@ import sys
 import time
 from typing import Optional
 
-from .http import health_ok, post_json
+from .http import chat_request, health_ok, make_client, post_json
 from .report import mean, median, prefill_quiet_line
 
 
@@ -123,21 +124,27 @@ def build_prompt(seed: int, target_chars: int,
 
 # ---------- 单请求 prefill 测量 ----------
 
-def measure_prefill(base: str, model: str, prompt: str,
+def measure_prefill(client, model: str, prompt: str,
                     max_tokens: int, timeout: int,
-                    api_key: Optional[str] = None) -> dict:
+                    stream: bool = False) -> dict:
+    """以 openai SDK 发送一次请求并测量 prefill 耗时。
+
+    网络/SDK 异常（含超时、HTTP 非 2xx 等）不抛出，统一折算为带
+    ``error`` 键的结果 dict，由调用方按 err/ok 分流统计。
+
+    返回键统一（流式与非流式一致）：elapsed、prompt_tokens、
+    completion_tokens、prefill_tps、ms_per_token、ttft、error；
+    ttft 流式下为首个内容 token 时刻 - t0，非流式恒 0。
+    """
     t0 = time.monotonic()
     try:
-        resp = post_json(
-            f"{base}/v1/chat/completions",
-            {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,   # 1 -> 只预填充，几乎不 decode
-                "temperature": 0,
-            },
+        r = chat_request(
+            client,
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,   # 1 -> 只预填充，几乎不 decode
             timeout=timeout,
-            api_key=api_key,
+            stream=stream,
         )
     except Exception as e:
         elapsed = time.monotonic() - t0
@@ -147,32 +154,36 @@ def measure_prefill(base: str, model: str, prompt: str,
             "completion_tokens": 0,
             "prefill_tps": 0.0,
             "ms_per_token": 0.0,
+            "ttft": 0.0,
             "error": f"{type(e).__name__}: {e}",
         }
     elapsed = time.monotonic() - t0
-    usage = resp.get("usage", {})
-    pt = usage.get("prompt_tokens", 0)
-    ct = usage.get("completion_tokens", 0)
+    usage = r["usage"]
+    pt = usage["prompt_tokens"]
+    ct = usage["completion_tokens"]
     # 注意：chat template 会把 messages 包装成完整 prompt，
     # 因此 usage.prompt_tokens 通常比裸文本 token 略多一点点。
+    # 流式下 ttft 为首个内容 token 时刻 - t0；非流式恒 0。
+    ttft = r["ttft"] if r["ttft"] is not None else 0.0
     return {
         "elapsed": elapsed,
         "prompt_tokens": pt,
         "completion_tokens": ct,
         "prefill_tps": pt / elapsed if elapsed > 0 else 0.0,
         "ms_per_token": elapsed * 1000 / pt if pt > 0 else 0.0,
-        "error": resp.get("error"),
+        "ttft": ttft,
+        "error": None,
     }
 
 
-def run_sample(base: str, model: str, seed: int, target_tokens: int,
+def run_sample(client, model: str, seed: int, target_tokens: int,
                char_per_token: float, max_tokens: int,
-               timeout: int, api_key: Optional[str] = None) -> dict:
+               timeout: int, stream: bool = False) -> dict:
     """根据 seed 生成文本并测量一次 prefill。"""
     target_chars = max(1, int(target_tokens * char_per_token))
     prompt = build_prompt(seed, target_chars)
-    r = measure_prefill(base, model, prompt, max_tokens, timeout,
-                        api_key=api_key)
+    r = measure_prefill(client, model, prompt, max_tokens, timeout,
+                        stream=stream)
     r.update({"seed": seed, "target_tokens": target_tokens,
               "gen_chars": len(prompt)})
     return r
@@ -200,6 +211,8 @@ def main() -> None:
     ap.add_argument("--warmup", action="store_true",
                     help="先发一个短请求暖机（避免首次 kernel 编译混入计时）")
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--stream", action="store_true",
+                    help="流式模式（SSE）：附加输出 TTFT，默认非流式（max_tokens=1 下流式价值有限）")
     ap.add_argument("--json-output", default=None, help="结果写入 JSON 文件")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
@@ -214,6 +227,7 @@ def main() -> None:
     if not health_ok(base, args.api_key):
         print(f"错误: {base}/health 不可用", file=sys.stderr)
         sys.exit(1)
+    client = make_client(base, args.api_key)
 
     # 用 /tokenize 自动校准字符/token 比，避免默认估算超 max_model_len
     if not args.char_per_token:
@@ -226,14 +240,10 @@ def main() -> None:
 
     if args.warmup:
         try:
-            post_json(
-                f"{base}/v1/chat/completions",
-                {"model": args.model,
-                 "messages": [{"role": "user", "content": "Reply with: ok"}],
-                 "max_tokens": 8, "temperature": 0},
-                timeout=120,
-                api_key=args.api_key,
-            )
+            chat_request(client, model=args.model,
+                         messages=[{"role": "user",
+                                     "content": "Reply with: ok"}],
+                         max_tokens=8, timeout=120, stream=False)
         except Exception as e:
             print(f"警告: 暖机请求失败: {e}", file=sys.stderr)
 
@@ -244,9 +254,9 @@ def main() -> None:
         runs = []
         for se in range(args.seeds):
             seed = secrets.randbits(63) if args.random_seeds else se
-            r = run_sample(base, args.model, seed, target_tokens,
+            r = run_sample(client, args.model, seed, target_tokens,
                            args.char_per_token, args.max_tokens,
-                           args.timeout, args.api_key)
+                           args.timeout, args.stream)
             samples.append(r)
             runs.append(r)
 
@@ -263,6 +273,10 @@ def main() -> None:
             "mean_prefill_tps": mean_tps,
             "median_prefill_tps": med_tps,
         }
+        if args.stream:
+            # 只对 ttft > 0（实测得）的样本求均值；mean(空列表)=0.0，语义为"未测得"
+            ttfts = [r["ttft"] for r in ok if r["ttft"] > 0]
+            s["ttft_mean"] = mean(ttfts)
         summary.append(s)
 
     if args.json_output:
@@ -280,7 +294,8 @@ def main() -> None:
             print(prefill_quiet_line(s["target_tokens"], s["ok"], s["runs"],
                                      s["mean_prompt_tokens"],
                                      s["mean_prefill_tps"],
-                                     s["median_prefill_tps"]))
+                                     s["median_prefill_tps"],
+                                     ttft_mean=s.get("ttft_mean")))
         return
 
     print("=" * 66)
@@ -295,6 +310,8 @@ def main() -> None:
         print(f"  prefill 均值: {s['mean_prefill_tps']:.1f} tok/s "
               f"(每 token {1000/s['mean_prefill_tps'] if s['mean_prefill_tps'] else 0:.2f} ms)")
         print(f"  prefill 中位数: {s['median_prefill_tps']:.1f} tok/s")
+        if args.stream:
+            print(f"  TTFT 均值: {s['ttft_mean']:.3f} s（首个内容 token）")
     print("-" * 66)
     # 逐样本明细
     for r in samples:

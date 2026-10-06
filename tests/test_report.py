@@ -81,6 +81,29 @@ class TestQuietLines(unittest.TestCase):
                       "per_req_mean=100.5", "per_req_p50=95.0"):
             self.assertIn(field, line)
 
+    def test_serve_quiet_line_stream_stats_none_keeps_legacy_format(self):
+        # stream_stats=None（默认）时输出与旧格式逐字符一致
+        line = serve_quiet_line(10.0, 8, 10, 800, 50, 80.0, 100.5, 95.0,
+                                stream_stats=None)
+        self.assertNotIn("\n", line)
+        for field in ("wall=", "requests=8/10", "total_ct=800",
+                      "total_pt=50", "avg_tps=80.0",
+                      "per_req_mean=100.5", "per_req_p50=95.0"):
+            self.assertIn(field, line)
+        # 不应包含流式字段
+        for field in ("ttft_mean", "decode_tps_mean", "chunks_mean"):
+            self.assertNotIn(field, line)
+
+    def test_serve_quiet_line_stream_stats_appended(self):
+        line = serve_quiet_line(10.0, 8, 10, 800, 50, 80.0, 100.5, 95.0,
+                                stream_stats={"ttft_mean": 0.25,
+                                              "decode_tps_mean": 18.75,
+                                              "chunks_mean": 18.0})
+        # 行尾追加流式统计字段（注意 18.75 按 .1f 四舍五入为 18.8）
+        self.assertIn("ttft_mean=0.250", line)
+        self.assertIn("decode_tps_mean=18.8", line)
+        self.assertIn("chunks_mean=18.0", line)
+
     def test_prefill_quiet_line_format(self):
         line = prefill_quiet_line(131072, 2, 3, 133000, 45210.5, 45000.2)
         self.assertNotIn("\n", line)

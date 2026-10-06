@@ -25,9 +25,8 @@ import argparse
 import concurrent.futures
 import sys
 import time
-from typing import Optional
 
-from .http import health_ok, post_json
+from .http import chat_request, health_ok, make_client
 from .report import mean, percentile, serve_quiet_line
 
 
@@ -39,25 +38,25 @@ def validate_cli_args(concurrency: int, n_requests: int) -> None:
         raise ValueError(f"--n-requests 必须 >= 0（当前值: {n_requests}）")
 
 
-def run_single(base: str, model: str, prompt: str, max_tokens: int,
-               timeout: int, api_key: Optional[str] = None) -> dict:
+def run_single(client, model: str, prompt: str, max_tokens: int,
+               timeout: int, stream: bool = False) -> dict:
     """发送单个请求，返回耗时与 token 统计。
 
     网络/HTTP 异常（非 2xx、连接失败、超时等）不抛出，统一折算为
     带 ``error`` 键的结果 dict，由调用方按 err/ok 分流统计。
+
+    返回键统一（流式与非流式一致）：elapsed、prompt_tokens、
+    completion_tokens、tok_per_s、ttft、decode_tps、chunk_count、error。
     """
     t0 = time.monotonic()
     try:
-        resp = post_json(
-            f"{base}/v1/chat/completions",
-            {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": max_tokens,
-                "temperature": 0,
-            },
+        r = chat_request(
+            client,
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
             timeout=timeout,
-            api_key=api_key,
+            stream=stream,
         )
     except Exception as e:
         elapsed = time.monotonic() - t0
@@ -66,18 +65,30 @@ def run_single(base: str, model: str, prompt: str, max_tokens: int,
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "tok_per_s": 0.0,
+            "ttft": 0.0,
+            "decode_tps": 0.0,
+            "chunk_count": 0,
             "error": f"{type(e).__name__}: {e}",
         }
     elapsed = time.monotonic() - t0
-    usage = resp.get("usage", {})
-    ct = usage.get("completion_tokens", 0)
-    pt = usage.get("prompt_tokens", 0)
+    usage = r["usage"]
+    ct = usage["completion_tokens"]
+    pt = usage["prompt_tokens"]
+    # ttft==0 表示未测得（非流式或流式无内容 token）
+    ttft = r["ttft"] if r["ttft"] is not None else 0.0
+    # decode 段口径：第 1 个 token 于 ttft 时刻到达，其余 ct-1 个 token
+    # 落在 (ttft, 流结束) 区间内，故分母为 elapsed - ttft
+    decode_tps = ((ct - 1) / (elapsed - ttft)
+                  if (stream and ttft and ct > 1 and elapsed > ttft) else 0.0)
     return {
         "elapsed": elapsed,
         "prompt_tokens": pt,
         "completion_tokens": ct,
         "tok_per_s": ct / elapsed if elapsed > 0 else 0.0,
-        "error": resp.get("error"),
+        "ttft": ttft,
+        "decode_tps": decode_tps,
+        "chunk_count": r["chunk_count"],
+        "error": None,
     }
 
 
@@ -95,6 +106,8 @@ def main() -> None:
     ap.add_argument("--n-requests", type=int, default=0,
                     help="总请求数（默认 = concurrency，即 1 轮）")
     ap.add_argument("--timeout", type=int, default=1800)
+    ap.add_argument("--stream", action="store_true",
+                    help="流式模式（SSE）：附加输出 TTFT 与 decode 段吞吐（默认非流式）")
     ap.add_argument("--quiet", action="store_true",
                     help="只输出核心数字")
     args = ap.parse_args()
@@ -109,6 +122,7 @@ def main() -> None:
     if not health_ok(base, args.api_key):
         print(f"错误: {base}/health 不可用", file=sys.stderr)
         sys.exit(1)
+    client = make_client(base, args.api_key)
 
     n_total = args.n_requests if args.n_requests > 0 else args.concurrency
     results = []
@@ -116,8 +130,8 @@ def main() -> None:
     t0_all = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futures = [
-            ex.submit(run_single, base, args.model, args.prompt,
-                      args.max_tokens, args.timeout, args.api_key)
+            ex.submit(run_single, client, args.model, args.prompt,
+                      args.max_tokens, args.timeout, args.stream)
             for _ in range(n_total)
         ]
         for f in concurrent.futures.as_completed(futures):
@@ -133,10 +147,20 @@ def main() -> None:
     per_req_tps = [r["tok_per_s"] for r in ok]
     mean_per_req = mean(per_req_tps)
     p50 = percentile(per_req_tps, 50)
+    # 只对 ttft > 0（实测得）的样本求均值；mean(空列表)=0.0，语义为"未测得"
+    ttfts = [r["ttft"] for r in ok if r["ttft"] > 0]
+    dtps = [r["decode_tps"] for r in ok]
+    chunks = [r["chunk_count"] for r in ok]
 
     if args.quiet:
+        stream_stats = None
+        if args.stream:
+            stream_stats = {"ttft_mean": mean(ttfts),
+                            "decode_tps_mean": mean(dtps),
+                            "chunks_mean": mean(chunks)}
         print(serve_quiet_line(wall, len(ok), len(results), total_ct,
-                               total_pt, avg_tps, mean_per_req, p50))
+                               total_pt, avg_tps, mean_per_req, p50,
+                               stream_stats=stream_stats))
         return
 
     print("=" * 60)
@@ -153,9 +177,17 @@ def main() -> None:
         print(f"总吞吐 (aggregate): {avg_tps:.1f} tok/s")
         print(f"每请求平均速度: {mean_per_req:.1f} tok/s")
         print(f"每请求 P50 速度: {p50:.1f} tok/s")
+        if args.stream:
+            print(f"TTFT 均值: {mean(ttfts):.3f} s（首个内容 token）")
+            print(f"decode 段吞吐均值: {mean(dtps):.1f} tok/s（剔除首 token）")
+            print(f"平均 chunk 数: {mean(chunks):.1f}")
         for i, r in enumerate(ok, 1):
-            print(f"  [req{i}] {r['completion_tokens']:>5} tok  "
-                  f"{r['elapsed']:6.2f}s  {r['tok_per_s']:6.1f} tok/s")
+            line = (f"  [req{i}] {r['completion_tokens']:>5} tok  "
+                    f"{r['elapsed']:6.2f}s  {r['tok_per_s']:6.1f} tok/s")
+            if args.stream:
+                line += (f"  {r['ttft']:6.3f}s  "
+                         f"{r['decode_tps']:6.1f} tok/s(decode)")
+            print(line)
     print("=" * 60)
 
 
