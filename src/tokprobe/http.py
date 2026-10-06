@@ -57,7 +57,7 @@ def make_client(base: str, api_key: Optional[str] = None) -> OpenAI:
 
 
 def chat_request(client, *, model, messages, max_tokens, timeout,
-                 temperature=0.0, stream=False) -> dict:
+                 temperature: Optional[float] = 0.0, stream=False) -> dict:
     """以 openai SDK 发起一次 chat completions 请求，统一返回统计 dict。
 
     返回结构（流式与非流式一致）::
@@ -69,16 +69,18 @@ def chat_request(client, *, model, messages, max_tokens, timeout,
 
     - usage 一律取响应 usage 字段（不做逐 token 文本解析），
       usage 缺失（None）时三字段计 0；
+    - ``temperature`` 为 None 时请求体不携带 temperature 键，
+      由服务端使用自身默认温度（如 vLLM 默认 1.0）生成；
     - 任何异常一律上抛，由调用方（run_single）兜底折算。
     """
+    # temperature 为 None 时不发送该键（服务端按其默认温度生成）
+    gen_kwargs = {"model": model, "messages": messages,
+                  "max_tokens": max_tokens, "timeout": timeout}
+    if temperature is not None:
+        gen_kwargs["temperature"] = temperature
+
     if not stream:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            timeout=timeout,
-        )
+        resp = client.chat.completions.create(**gen_kwargs)
         u = resp.usage
         if u is None:
             usage = {"prompt_tokens": 0, "completion_tokens": 0,
@@ -92,11 +94,7 @@ def chat_request(client, *, model, messages, max_tokens, timeout,
     # 流式：t0 必须在 create 之前取，TTFT 才覆盖排队与首包延迟
     t0 = time.monotonic()
     s = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        timeout=timeout,
+        **gen_kwargs,
         stream=True,
         stream_options={"include_usage": True},
     )

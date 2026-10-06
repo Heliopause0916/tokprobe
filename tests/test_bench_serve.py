@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from tokprobe.bench_serve import run_single, validate_cli_args
+from tokprobe.bench_serve import main, run_single, validate_cli_args
 from tokprobe.report import mean, percentile, serve_quiet_line
 
 
@@ -126,6 +126,48 @@ class TestValidateCliArgs(unittest.TestCase):
     def test_valid_values_accepted(self):
         validate_cli_args(1, 0)      # n_requests=0 表示回落为并发数，合法
         validate_cli_args(4, 8)
+
+
+class TestNoTemperatureCli(unittest.TestCase):
+    """--no-temperature：main 将该开关折算为 temperature=None 传给 run_single。"""
+
+    def _ok_result(self):
+        return {
+            "elapsed": 1.0,
+            "prompt_tokens": 8,
+            "completion_tokens": 16,
+            "tok_per_s": 16.0,
+            "ttft": 0.0,
+            "decode_tps": 0.0,
+            "chunk_count": 0,
+            "error": None,
+        }
+
+    @patch("tokprobe.bench_serve.run_single")
+    @patch("tokprobe.bench_serve.make_client")
+    @patch("tokprobe.bench_serve.health_ok", return_value=True)
+    def test_no_temperature_flag_passes_none(self, mock_health,
+                                              mock_client, mock_run):
+        mock_run.return_value = self._ok_result()
+        with patch.object(sys, "argv", ["bench_serve", "--model", "test-model",
+                                        "--no-temperature", "--quiet"]):
+            main()
+        mock_run.assert_called_once()
+        # 第 7 个位置参数（temperature）为 None -> 请求不发送 temperature 字段
+        self.assertIsNone(mock_run.call_args.args[6])
+
+    @patch("tokprobe.bench_serve.run_single")
+    @patch("tokprobe.bench_serve.make_client")
+    @patch("tokprobe.bench_serve.health_ok", return_value=True)
+    def test_without_flag_keeps_default_zero(self, mock_health,
+                                             mock_client, mock_run):
+        # 未指定 --no-temperature 时行为与现状一致：temperature=0.0
+        mock_run.return_value = self._ok_result()
+        with patch.object(sys, "argv", ["bench_serve", "--model", "test-model",
+                                        "--quiet"]):
+            main()
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args.args[6], 0.0)
 
 
 if __name__ == "__main__":

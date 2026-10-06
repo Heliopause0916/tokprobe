@@ -148,6 +148,31 @@ class TestChatRequestNonStream(unittest.TestCase):
         self.assertEqual(kwargs["timeout"], 30)
         self.assertNotIn("stream", kwargs)
 
+    def test_chat_request_keeps_temperature_by_default(self):
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            usage=None)
+
+        chat_request(client, model="test-model",
+                     messages=[{"role": "user", "content": "hi"}],
+                     max_tokens=16, timeout=30)
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["temperature"], 0.0)
+
+    def test_chat_request_temperature_none_omits_key(self):
+        # temperature=None 时请求中不携带 temperature 键（服务端按默认温度生成）
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            usage=None)
+
+        chat_request(client, model="test-model",
+                     messages=[{"role": "user", "content": "hi"}],
+                     max_tokens=16, timeout=30, temperature=None)
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        self.assertNotIn("temperature", kwargs)
+
 
 class _FakeStream(list):
     """承载 chunk 列表的假流对象，记录 close() 是否被调用。"""

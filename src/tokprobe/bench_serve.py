@@ -25,6 +25,7 @@ import argparse
 import concurrent.futures
 import sys
 import time
+from typing import Optional
 
 from .http import chat_request, health_ok, make_client
 from .report import mean, percentile, serve_quiet_line
@@ -39,7 +40,8 @@ def validate_cli_args(concurrency: int, n_requests: int) -> None:
 
 
 def run_single(client, model: str, prompt: str, max_tokens: int,
-               timeout: int, stream: bool = False) -> dict:
+               timeout: int, stream: bool = False,
+               temperature: Optional[float] = 0.0) -> dict:
     """发送单个请求，返回耗时与 token 统计。
 
     网络/HTTP 异常（非 2xx、连接失败、超时等）不抛出，统一折算为
@@ -56,6 +58,7 @@ def run_single(client, model: str, prompt: str, max_tokens: int,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=max_tokens,
             timeout=timeout,
+            temperature=temperature,
             stream=stream,
         )
     except Exception as e:
@@ -108,6 +111,8 @@ def main() -> None:
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--stream", action="store_true",
                     help="流式模式（SSE）：附加输出 TTFT 与 decode 段吞吐（默认非流式）")
+    ap.add_argument("--no-temperature", action="store_true",
+                    help="不发送 temperature 字段，由服务端使用默认温度生成（输出不可复现，适用于模拟真实随机生成负载）")
     ap.add_argument("--quiet", action="store_true",
                     help="只输出核心数字")
     args = ap.parse_args()
@@ -131,7 +136,8 @@ def main() -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as ex:
         futures = [
             ex.submit(run_single, client, args.model, args.prompt,
-                      args.max_tokens, args.timeout, args.stream)
+                      args.max_tokens, args.timeout, args.stream,
+                      None if args.no_temperature else 0.0)
             for _ in range(n_total)
         ]
         for f in concurrent.futures.as_completed(futures):
