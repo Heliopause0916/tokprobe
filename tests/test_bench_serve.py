@@ -4,9 +4,11 @@
 不发起任何真实网络请求。
 """
 
+import io
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
@@ -52,8 +54,10 @@ class TestRunSingleNetworkErrors(unittest.TestCase):
         self.assertEqual(r["completion_tokens"], 16)
         self.assertEqual(r["elapsed"], 1.0)
         self.assertEqual(r["tok_per_s"], 16.0)
-        self.assertEqual(r["ttft"], 0.0)
-        self.assertEqual(r["decode_tps"], 0.0)
+        # 非流式未测得 TTFT：ttft/decode_tps 保留 None（不可计算），
+        # 不再用 0.0 冒充测得值
+        self.assertIsNone(r["ttft"])
+        self.assertIsNone(r["decode_tps"])
         self.assertEqual(r["chunk_count"], 0)
 
     @patch("tokprobe.bench_serve.time.monotonic", side_effect=[0.0, 1.0])
@@ -73,6 +77,24 @@ class TestRunSingleNetworkErrors(unittest.TestCase):
         self.assertEqual(r["tok_per_s"], 16.0)
         # decode: (16-1)/(1.0-0.2) = 18.75
         self.assertAlmostEqual(r["decode_tps"], 18.75, places=9)
+
+    @patch("tokprobe.bench_serve.time.monotonic", side_effect=[0.0, 1.0])
+    @patch("tokprobe.bench_serve.chat_request")
+    def test_stream_missing_ttft_returns_none_decode_tps(self, mock_chat,
+                                                         mock_monotonic):
+        # 流式但未测得 TTFT（如模型只输出 reasoning_content 且被 max_tokens
+        # 截断，content 从未非空）：decode_tps 应为 None（不可计算），
+        # 不得用 0.0 冒充测得值
+        mock_chat.return_value = {
+            "usage": {"prompt_tokens": 8, "completion_tokens": 16},
+            "ttft": None,
+            "chunk_count": 18,
+        }
+        r = _run_single(mock_chat, stream=True)
+        self.assertIsNone(r["error"])
+        self.assertEqual(r["tok_per_s"], 16.0)
+        self.assertIsNone(r["ttft"])
+        self.assertIsNone(r["decode_tps"])
 
 
 class TestAggregationWithAllFailures(unittest.TestCase):
@@ -112,6 +134,44 @@ class TestAggregationWithAllFailures(unittest.TestCase):
         line = serve_quiet_line(wall, len(ok), len(results), total_ct,
                                 total_pt, avg_tps, mean_per_req, p50)
         self.assertIn("requests=0/3", line)
+
+
+class TestDecodeAggregation(unittest.TestCase):
+    """流式聚合：未测得（None）样本不参与 ttft / decode 均值。"""
+
+    def _result(self, ttft, decode_tps, ct=16, elapsed=1.0, chunk_count=18):
+        return {
+            "elapsed": elapsed,
+            "prompt_tokens": 8,
+            "completion_tokens": ct,
+            "tok_per_s": ct / elapsed if elapsed > 0 else 0.0,
+            "ttft": ttft,
+            "decode_tps": decode_tps,
+            "chunk_count": chunk_count,
+            "error": None,
+        }
+
+    @patch("tokprobe.bench_serve.run_single")
+    @patch("tokprobe.bench_serve.make_client")
+    @patch("tokprobe.bench_serve.health_ok", return_value=True)
+    def test_stream_decode_mean_only_uses_measurable_samples(
+            self, mock_health, mock_client, mock_run):
+        # 混合样本：一个未测得（None），一个有效（ttft=0.2 / decode=18.75）
+        mock_run.side_effect = [
+            self._result(None, None),
+            self._result(0.2, 18.75),
+        ]
+        buf = io.StringIO()
+        with patch.object(sys, "argv", ["bench_serve", "--model", "test-model",
+                                        "--stream", "--quiet",
+                                        "--concurrency", "2"]):
+            with redirect_stdout(buf):
+                main()
+        out = buf.getvalue()
+        # 均值只统计有效样本（0.2 / 18.75），未测得样本不以 0.0 拉低均值
+        self.assertIn("ttft_mean=0.200", out)
+        self.assertIn("decode_tps_mean=18.8", out)
+        self.assertNotIn("None", out)
 
 
 class TestValidateCliArgs(unittest.TestCase):

@@ -41,6 +41,23 @@ def post_json(url: str, payload: dict, timeout: int,
     return obj
 
 
+def _has_output_token(delta) -> bool:
+    """delta 是否携带首个输出 token 的有效字段。
+
+    TTFT 口径：content / reasoning / reasoning_content / tool_calls 任一
+    非空即视为输出开始。reasoning 模型（如 deepseek-v4-flash）常只输出
+    reasoning（vLLM）或 reasoning_content（deepseek 官方 API 风格）、
+    content 长期为空；若只认 content，TTFT 会迟记到首个 content 时刻，
+    甚至因 max_tokens 截断而从未测得。
+    """
+    if delta is None:
+        return False
+    for name in ("content", "reasoning", "reasoning_content"):
+        if getattr(delta, name, None):
+            return True
+    return bool(getattr(delta, "tool_calls", None))
+
+
 def make_client(base: str, api_key: Optional[str] = None) -> OpenAI:
     """构造 openai 同步客户端（供 chat_request 使用）。
 
@@ -64,7 +81,9 @@ def chat_request(client, *, model, messages, max_tokens, timeout,
 
         {"usage": {"prompt_tokens": int, "completion_tokens": int,
                    "total_tokens": int},
-         "ttft": float | None,  # 流式首个内容 token 到达时刻（秒）；非流式 None
+         "ttft": float | None,  # 流式首个输出 token 到达时刻（秒，content /
+                                # reasoning / reasoning_content / tool_calls
+                                # 任一非空即计）；非流式 None
          "chunk_count": int}    # 流式收到的 chunk 数；非流式恒为 0
 
     - usage 一律取响应 usage 字段（不做逐 token 文本解析），
@@ -108,8 +127,10 @@ def chat_request(client, *, model, messages, max_tokens, timeout,
             if chunk.usage is not None:
                 usage = chunk.usage
             if ttft is None and chunk.choices:
-                content = getattr(chunk.choices[0].delta, "content", None)
-                if content:  # role-only / 空串 chunk 跳过，非空内容才算
+                # 首个非空 delta 字段（content / reasoning /
+                # reasoning_content / tool_calls 任一）即记录 TTFT；
+                # role-only / 空串 / delta=None 的 chunk 安全跳过
+                if _has_output_token(chunk.choices[0].delta):
                     ttft = time.monotonic() - t0
     finally:
         s.close()

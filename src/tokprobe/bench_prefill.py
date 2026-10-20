@@ -134,7 +134,8 @@ def measure_prefill(client, model: str, prompt: str,
 
     返回键统一（流式与非流式一致）：elapsed、prompt_tokens、
     completion_tokens、prefill_tps、ms_per_token、ttft、error；
-    ttft 流式下为首个内容 token 时刻 - t0，非流式恒 0。
+    ttft 流式下为首个输出 token 到达时刻 - t0（content /
+    reasoning_content / tool_calls 任一非空即计），非流式恒 0。
     """
     t0 = time.monotonic()
     try:
@@ -163,7 +164,9 @@ def measure_prefill(client, model: str, prompt: str,
     ct = usage["completion_tokens"]
     # 注意：chat template 会把 messages 包装成完整 prompt，
     # 因此 usage.prompt_tokens 通常比裸文本 token 略多一点点。
-    # 流式下 ttft 为首个内容 token 时刻 - t0；非流式恒 0。
+    # 流式下 ttft 为首个输出 token 到达时刻 - t0（content /
+    # reasoning_content / tool_calls 任一非空即计）；非流式恒 0。
+    # 0.0 仅表示未测得/非流式占位，聚合时按 >0 过滤。
     ttft = r["ttft"] if r["ttft"] is not None else 0.0
     return {
         "elapsed": elapsed,
@@ -311,7 +314,7 @@ def main() -> None:
               f"(每 token {1000/s['mean_prefill_tps'] if s['mean_prefill_tps'] else 0:.2f} ms)")
         print(f"  prefill 中位数: {s['median_prefill_tps']:.1f} tok/s")
         if args.stream:
-            print(f"  TTFT 均值: {s['ttft_mean']:.3f} s（首个内容 token）")
+            print(f"  TTFT 均值: {s['ttft_mean']:.3f} s（首个输出 token）")
     print("-" * 66)
     # 逐样本明细
     for r in samples:

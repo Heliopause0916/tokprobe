@@ -77,12 +77,14 @@ def run_single(client, model: str, prompt: str, max_tokens: int,
     usage = r["usage"]
     ct = usage["completion_tokens"]
     pt = usage["prompt_tokens"]
-    # ttft==0 表示未测得（非流式或流式无内容 token）
-    ttft = r["ttft"] if r["ttft"] is not None else 0.0
+    # ttft 为 None 表示未测得（非流式 / 流式无输出 token），保留该区分
+    ttft = r["ttft"]
     # decode 段口径：第 1 个 token 于 ttft 时刻到达，其余 ct-1 个 token
     # 落在 (ttft, 流结束) 区间内，故分母为 elapsed - ttft
+    # 未测得 TTFT 或样本不可计算时返回 None（不参与均值），而非 0.0 冒充
     decode_tps = ((ct - 1) / (elapsed - ttft)
-                  if (stream and ttft and ct > 1 and elapsed > ttft) else 0.0)
+                  if (stream and ttft is not None and ct > 1
+                      and elapsed > ttft) else None)
     return {
         "elapsed": elapsed,
         "prompt_tokens": pt,
@@ -153,9 +155,10 @@ def main() -> None:
     per_req_tps = [r["tok_per_s"] for r in ok]
     mean_per_req = mean(per_req_tps)
     p50 = percentile(per_req_tps, 50)
-    # 只对 ttft > 0（实测得）的样本求均值；mean(空列表)=0.0，语义为"未测得"
-    ttfts = [r["ttft"] for r in ok if r["ttft"] > 0]
-    dtps = [r["decode_tps"] for r in ok]
+    # 只对实测得（非 None）的样本求均值；mean(空列表)=0.0，语义为"未测得"
+    ttfts = [r["ttft"] for r in ok if r["ttft"] is not None]
+    # decode 均值与 ttfts 口径一致：过滤未测得（None）的样本
+    dtps = [r["decode_tps"] for r in ok if r["decode_tps"] is not None]
     chunks = [r["chunk_count"] for r in ok]
 
     if args.quiet:
@@ -184,15 +187,16 @@ def main() -> None:
         print(f"每请求平均速度: {mean_per_req:.1f} tok/s")
         print(f"每请求 P50 速度: {p50:.1f} tok/s")
         if args.stream:
-            print(f"TTFT 均值: {mean(ttfts):.3f} s（首个内容 token）")
+            print(f"TTFT 均值: {mean(ttfts):.3f} s（首个输出 token）")
             print(f"decode 段吞吐均值: {mean(dtps):.1f} tok/s（剔除首 token）")
             print(f"平均 chunk 数: {mean(chunks):.1f}")
         for i, r in enumerate(ok, 1):
             line = (f"  [req{i}] {r['completion_tokens']:>5} tok  "
                     f"{r['elapsed']:6.2f}s  {r['tok_per_s']:6.1f} tok/s")
             if args.stream:
-                line += (f"  {r['ttft']:6.3f}s  "
-                         f"{r['decode_tps']:6.1f} tok/s(decode)")
+                # 未测得（None）显示为 0.0 占位，保持列结构与原格式不变
+                line += (f"  {r['ttft'] or 0.0:6.3f}s  "
+                         f"{r['decode_tps'] or 0.0:6.1f} tok/s(decode)")
             print(line)
     print("=" * 60)
 

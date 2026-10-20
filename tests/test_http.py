@@ -247,6 +247,134 @@ class TestChatRequestStream(unittest.TestCase):
                                       "total_tokens": 0})
         self.assertEqual(r["chunk_count"], 1)
 
+    @patch("tokprobe.http.time.monotonic", side_effect=[0.0, 0.3])
+    def test_stream_ttft_recorded_on_reasoning_content(self, mock_monotonic):
+        # reasoning 模型：content 为空串，首个输出 token 走 reasoning_content，
+        # 只认 content 会导致 TTFT 迟记/未测得；修复后应记录在 0.3s
+        chunks = _FakeStream([
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="",
+                                          reasoning_content="思考"),
+                    finish_reason=None)],
+                usage=None),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["ttft"], 0.3)
+
+    @patch("tokprobe.http.time.monotonic", side_effect=[0.0, 0.3])
+    def test_stream_ttft_recorded_on_reasoning(self, mock_monotonic):
+        # vLLM 推理模型：推理 token 走 delta.reasoning（实测字段名），
+        # content 为空串；只认 content 会迟记/未测得，修复后记录在 0.3s
+        chunks = _FakeStream([
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="", reasoning="思考"),
+                    finish_reason=None)],
+                usage=None),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["ttft"], 0.3)
+
+    @patch("tokprobe.http.time.monotonic", side_effect=[0.0, 0.4])
+    def test_stream_ttft_recorded_on_content_with_none_reasoning(
+            self, mock_monotonic):
+        # 回归：reasoning 为 None 时 content 非空仍记录 TTFT（0.4s）
+        chunks = _FakeStream([
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(reasoning=None, content="你好"),
+                    finish_reason=None)],
+                usage=None),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["ttft"], 0.4)
+
+    @patch("tokprobe.http.time.monotonic", side_effect=[0.0, 0.4])
+    def test_stream_ttft_recorded_on_tool_calls(self, mock_monotonic):
+        # tool_calls 也是输出开始：content 为 None 时首个 tool_calls chunk 记录 TTFT
+        chunks = _FakeStream([
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content=None,
+                                          tool_calls=[{"id": "c1"}]),
+                    finish_reason=None)],
+                usage=None),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["ttft"], 0.4)
+
+    @patch("tokprobe.http.time.monotonic", side_effect=[0.0, 0.5])
+    def test_stream_delta_none_chunk_skipped_safely(self, mock_monotonic):
+        # delta=None 的 chunk 不报错、不触发 TTFT；后续 content chunk 正常记录
+        chunks = _FakeStream([
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=None, finish_reason=None)],
+                usage=None),
+            SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="你"),
+                                         finish_reason=None)],
+                usage=None),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["ttft"], 0.5)
+
+    @patch("tokprobe.http.time.monotonic", side_effect=[0.0, 0.2])
+    def test_stream_ttft_uses_first_non_empty_field(self, mock_monotonic):
+        # reasoning_content 与 content 混合：reasoning 先到（0.2s），
+        # content 后到；TTFT 应记首个非空字段时刻（0.2s）而非 content 时刻
+        chunks = _FakeStream([
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="",
+                                          reasoning_content="想"),
+                    finish_reason=None)],
+                usage=None),
+            SimpleNamespace(
+                choices=[SimpleNamespace(
+                    delta=SimpleNamespace(content="答案"),
+                    finish_reason=None)],
+                usage=None),
+        ])
+        client = MagicMock()
+        client.chat.completions.create.return_value = chunks
+
+        r = chat_request(client, model="test-model",
+                         messages=[{"role": "user", "content": "hi"}],
+                         max_tokens=16, timeout=30, stream=True)
+
+        self.assertEqual(r["ttft"], 0.2)
+
     def test_stream_interrupted_propagates_and_closes(self):
         class _BrokenStream(_FakeStream):
             def __iter__(self):
