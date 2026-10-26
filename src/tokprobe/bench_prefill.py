@@ -41,6 +41,7 @@ vLLM（OpenAI 兼容接口）预填充（prefill）测速工具
 import argparse
 import concurrent.futures
 import json
+import os
 import random
 import secrets
 import sys
@@ -198,8 +199,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="vLLM / OpenAI 兼容接口预填充测速")
     ap.add_argument("--base-url", default="http://127.0.0.1:8082",
                     help="服务基础地址，含协议与端口，如 http://192.168.6.3:8098")
-    ap.add_argument("--api-key", default=None, type=str,
-                    help="可选：Bearer 认证密钥")
+    ap.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY"),
+                    type=str, help="可选：Bearer 认证密钥")
     ap.add_argument("--model", required=True, help="模型名（必填）")
     ap.add_argument("--target-tokens", default="131072",
                     help="目标 token 档位，逗号分隔多值，如 65536,131072")

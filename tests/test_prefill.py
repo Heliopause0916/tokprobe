@@ -3,15 +3,17 @@
 被测逻辑不涉及任何真实网络请求（网络层一律 mock：chat_request / post_json）。
 """
 
+import io
 import os
 import sys
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import MagicMock, patch
 
 # src layout：不安装包即可让 `python -m unittest discover -s tests` 找到 tokprobe
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from tokprobe.bench_prefill import (build_prompt, measure_prefill,
+from tokprobe.bench_prefill import (build_prompt, main, measure_prefill,
                                     parse_target_tokens)
 from tokprobe.report import mean, median, prefill_quiet_line
 
@@ -167,6 +169,72 @@ class TestParseTargetTokens(unittest.TestCase):
         for s in ("abc", "1024,xyz"):
             with self.assertRaises(ValueError):
                 parse_target_tokens(s)
+
+
+class TestApiKeyEnvVar(unittest.TestCase):
+    """--api-key 支持环境变量 OPENAI_API_KEY，优先级：命令行 > 环境变量 > None。"""
+
+    def _ok_result(self):
+        return {
+            "elapsed": 1.0,
+            "prompt_tokens": 100,
+            "completion_tokens": 1,
+            "prefill_tps": 100.0,
+            "ms_per_token": 10.0,
+            "ttft": 0.0,
+            "error": None,
+            "seed": 0,
+            "target_tokens": 131072,
+            "gen_chars": 100,
+        }
+
+    @patch("tokprobe.bench_prefill.run_sample")
+    @patch("tokprobe.bench_prefill.calibrate_char_per_token", return_value=1.0)
+    @patch("tokprobe.bench_prefill.make_client")
+    @patch("tokprobe.bench_prefill.health_ok", return_value=True)
+    def test_env_var_used_when_no_cli_flag(self, mock_health, mock_client,
+                                           mock_calibrate, mock_run):
+        mock_run.return_value = self._ok_result()
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env"},
+                        clear=False):
+            with patch.object(sys, "argv", ["bench_prefill", "--model",
+                                            "test-model", "--quiet"]):
+                with redirect_stdout(io.StringIO()):
+                    main()
+        mock_client.assert_called_once_with("http://127.0.0.1:8082", "sk-env")
+
+    @patch("tokprobe.bench_prefill.run_sample")
+    @patch("tokprobe.bench_prefill.calibrate_char_per_token", return_value=1.0)
+    @patch("tokprobe.bench_prefill.make_client")
+    @patch("tokprobe.bench_prefill.health_ok", return_value=True)
+    def test_cli_flag_overrides_env_var(self, mock_health, mock_client,
+                                        mock_calibrate, mock_run):
+        mock_run.return_value = self._ok_result()
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env"},
+                        clear=False):
+            with patch.object(sys, "argv", ["bench_prefill", "--model",
+                                            "test-model", "--api-key",
+                                            "sk-cli", "--quiet"]):
+                with redirect_stdout(io.StringIO()):
+                    main()
+        mock_client.assert_called_once_with("http://127.0.0.1:8082", "sk-cli")
+
+    @patch("tokprobe.bench_prefill.run_sample")
+    @patch("tokprobe.bench_prefill.calibrate_char_per_token", return_value=1.0)
+    @patch("tokprobe.bench_prefill.make_client")
+    @patch("tokprobe.bench_prefill.health_ok", return_value=True)
+    def test_no_env_var_no_cli_flag_passes_none(self, mock_health,
+                                                mock_client, mock_calibrate,
+                                                mock_run):
+        # 与现状一致：两者都无时 default 为 None（make_client 内部用占位值 EMPTY）
+        mock_run.return_value = self._ok_result()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)
+            with patch.object(sys, "argv", ["bench_prefill", "--model",
+                                            "test-model", "--quiet"]):
+                with redirect_stdout(io.StringIO()):
+                    main()
+        mock_client.assert_called_once_with("http://127.0.0.1:8082", None)
 
 
 if __name__ == "__main__":

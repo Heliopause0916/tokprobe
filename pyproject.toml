@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "轻量 vLLM 测速 / prefill 探针：基于 requests + openai SDK 的 OpenAI 兼容接口测量工具"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["requests", "openai>=1.26.0"]
+dependencies = ["requests", "openai>=1.26.0", "certifi>=2026.10.19"]
 license = { text = "MIT" }
 
 [project.scripts]

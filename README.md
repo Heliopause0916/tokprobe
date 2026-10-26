@@ -13,7 +13,7 @@ tokprobe 定位为**轻量测量工具**而非压测平台：用最少的代码�
 
 ## 安装
 
-依赖为 requests + openai>=1.26.0（Python 3.9+）。
+依赖为 requests + openai>=1.26.0 + certifi>=2026.10.19（Python 3.9+）。
 
 ```bash
 # 方式一：可编辑安装（提供 tokprobe-serve / tokprobe-prefill 两个命令）
@@ -23,6 +23,10 @@ pip install -e .
 #（PowerShell 用 $env:PYTHONPATH="src"；bash 用 PYTHONPATH=src 前缀）
 python -m tokprobe.bench_serve --model my-model --quiet
 python -m tokprobe.bench_prefill --model my-model --quiet
+
+# 方式三：直接依赖按 requirements.txt 固定（传递依赖未锁定）
+#（方式一与方式三解析的依赖版本组合可能不同：方式一按 pyproject 解析到最新兼容版本）
+pip install -r requirements.txt
 ```
 
 > 说明：`python -m tokprobe.xxx` 依赖包可被导入。方式一安装后直接可用；
@@ -39,7 +43,7 @@ python -m tokprobe.bench_prefill --model my-model --quiet
 - **usage 获取**：流式请求带 `stream_options={"include_usage": True}`，token
   数始终取响应 usage 字段。需要 vLLM 支持 include_usage：较旧版本在最终
   chunk 缺 usage 或直接报 400。
-- **依赖**：requests + openai>=1.26.0（Python 3.9+）。
+- **依赖**：requests + openai>=1.26.0 + certifi>=2026.10.19（Python 3.9+）。
 
 ## 用法
 
@@ -71,7 +75,7 @@ wall=12.34s requests=8/8 total_ct=2048 total_pt=64 avg_tps=166.0 per_req_mean=92
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8082` | 服务基础地址（含协议与端口），如 `http://192.168.6.3:8098` |
-| `--api-key` | 无 | 可选，Bearer 认证密钥 |
+| `--api-key` | 无（可用环境变量 `OPENAI_API_KEY`） | 可选，Bearer 认证密钥；也支持通过环境变量 `OPENAI_API_KEY` 提供，环境变量优先级低于命令行参数 |
 | `--model` | 必填 | 模型名（必填，无默认值） |
 | `--prompt` | `介绍一下QUIC协议` | 请求内容 |
 | `--max-tokens` | `4096` | 每个请求最大生成 token |

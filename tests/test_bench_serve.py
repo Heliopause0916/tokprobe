@@ -230,5 +230,62 @@ class TestNoTemperatureCli(unittest.TestCase):
         self.assertEqual(mock_run.call_args.args[6], 0.0)
 
 
+class TestApiKeyEnvVar(unittest.TestCase):
+    """--api-key 支持环境变量 OPENAI_API_KEY，优先级：命令行 > 环境变量 > None。"""
+
+    def _ok_result(self):
+        return {
+            "elapsed": 1.0,
+            "prompt_tokens": 8,
+            "completion_tokens": 16,
+            "tok_per_s": 16.0,
+            "ttft": 0.0,
+            "decode_tps": 0.0,
+            "chunk_count": 0,
+            "error": None,
+        }
+
+    @patch("tokprobe.bench_serve.run_single")
+    @patch("tokprobe.bench_serve.make_client")
+    @patch("tokprobe.bench_serve.health_ok", return_value=True)
+    def test_env_var_used_when_no_cli_flag(self, mock_health, mock_client,
+                                           mock_run):
+        mock_run.return_value = self._ok_result()
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env"},
+                        clear=False):
+            with patch.object(sys, "argv", ["bench_serve", "--model",
+                                            "test-model", "--quiet"]):
+                main()
+        mock_client.assert_called_once_with("http://127.0.0.1:8082", "sk-env")
+
+    @patch("tokprobe.bench_serve.run_single")
+    @patch("tokprobe.bench_serve.make_client")
+    @patch("tokprobe.bench_serve.health_ok", return_value=True)
+    def test_cli_flag_overrides_env_var(self, mock_health, mock_client,
+                                        mock_run):
+        mock_run.return_value = self._ok_result()
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-env"},
+                        clear=False):
+            with patch.object(sys, "argv", ["bench_serve", "--model",
+                                            "test-model", "--api-key",
+                                            "sk-cli", "--quiet"]):
+                main()
+        mock_client.assert_called_once_with("http://127.0.0.1:8082", "sk-cli")
+
+    @patch("tokprobe.bench_serve.run_single")
+    @patch("tokprobe.bench_serve.make_client")
+    @patch("tokprobe.bench_serve.health_ok", return_value=True)
+    def test_no_env_var_no_cli_flag_passes_none(self, mock_health,
+                                                mock_client, mock_run):
+        # 与现状一致：两者都无时 default 为 None（make_client 内部用占位值 EMPTY）
+        mock_run.return_value = self._ok_result()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)
+            with patch.object(sys, "argv", ["bench_serve", "--model",
+                                            "test-model", "--quiet"]):
+                main()
+        mock_client.assert_called_once_with("http://127.0.0.1:8082", None)
+
+
 if __name__ == "__main__":
     unittest.main()
